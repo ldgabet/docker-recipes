@@ -1,0 +1,144 @@
+version: '3'
+
+services:
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    hostname: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - frontend
+    ports:
+      - 80:80
+      - 443:443
+    command:
+      ## API Settings - https://docs.traefik.io/operations/api/, endpoints - https://docs.traefik.io/operations/api/#endpoints ##
+      - "--api.dashboard=true" # <== Enabling the dashboard to view services, middlewares, routers, etc...
+      ## Enable AccessLog
+      - "--accesslog=false"
+      ## Provider Settings - https://docs.traefik.io/providers/docker/#provider-configuration ##
+      - "--providers.docker=true" # <== Enabling docker as the provider for traefik
+      - "--providers.docker.exposedbydefault=false" # <== Don't expose every container to traefik, only expose enabled ones
+      - "--providers.docker.network=frontend" # <== Operate on the docker network named 'frontend'
+      ## Entrypoints Settings - https://docs.traefik.io/routing/entrypoints/#configuration ##
+      - "--entrypoints.web.address=:80" # <== Defining an entrypoint for port :80 named web
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure" # <== To redirect 80 (web) to 443 (websecure)
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      - "--entrypoints.websecure.address=:443" # <== Defining an entrypoint for https on port :443 named websecure
+      - "--entrypoints.websecure.http.tls.certResolver=mytlschallenge"
+      ## Certificate Settings (Let's Encrypt) -  https://docs.traefik.io/https/acme/#configuration-examples ##
+      - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true" # <== Enable TLS-ALPN-01 to generate and renew ACME certs
+      - "--certificatesresolvers.mytlschallenge.acme.email=${CONTACT_CERT_MAIL}" # <== Setting email for certs
+      - "--certificatesresolvers.mytlschallenge.acme.storage=/acme.json" # <== Defining acme file to store cert information
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /opt/volumes/traefik/acme.json:/acme.json
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${MY_DOMAIN}`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+
+   mariadb:
+      image: mariadb:latest
+      container_name: mariadb
+      hostname: mariadb
+      restart: unless-stopped
+      networks:
+         - backend
+      environment:
+         - MYSQL_ROOT_PASSWORD=${MYSQL_PASSWORD}
+      volumes:
+         - /opt/volumes/mariadb/mysql:/var/lib/mysql
+      labels:
+         - 'traefik.enable=false'
+
+   redis:
+      image: redis:alpine
+      container_name: redis
+      hostname: redis
+      restart: unless-stopped
+      networks:
+         - backend
+      volumes:
+         - /opt/volumes/redis/data:/data
+      labels:
+         - 'traefik.enable=false'
+
+   nextcloud:
+      image: nextcloud:fpm-alpine
+      container_name: nextcloud
+      hostname: nextcloud
+      restart: unless-stopped
+      depends_on:
+         - mariadb
+         - redis
+      security_opt:
+         - no-new-privileges:true
+      networks:
+         - frontend
+         - backend
+      environment:
+         - MYSQL_HOST=mariadb
+         - MYSQL_USER=root
+         - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+         - MYSQL_DATABASE=nextcloud
+         - REDIS_HOST=redis
+         - REDIS_HOST_PORT=6379
+         - OVERWRITEPROTOCOL=https
+         - OVERWRITEHOST=nc.${MY_DOMAIN}
+      volumes:
+         - /opt/volumes/nextcloud/html:/var/www/html
+      labels:
+         - "traefik.enable=false"
+     
+   nginx:
+      image: nginx:alpine
+      container_name: nginx
+      hostname: nginx
+      restart: unless-stopped
+      security_opt:
+         - no-new-privileges:true
+      depends_on:
+         - nextcloud
+      networks:
+         - frontend
+         - backend
+      volumes:
+         - /opt/volumes/nextcloud/html:/var/www/html/:ro
+         - /opt/volumes/nginx/nginx.conf:/etc/nginx/nginx.conf:ro 
+      labels:
+         - "traefik.enable=true"
+         - "traefik.http.routers.nextcloud.entrypoints=websecure"
+         - "traefik.http.routers.nextcloud.rule=Host(`nc.${MY_DOMAIN}`)"
+         - "traefik.http.routers.nextcloud.middlewares=nc-caldav"
+         - "traefik.http.middlewares.nc-caldav.redirectregex.permanent=true"
+         - "traefik.http.middlewares.nc-caldav.redirectregex.regex=^https://(.*)/.well-known/(card|cal)dav"
+         - "traefik.http.middlewares.nc-caldav.redirectregex.replacement=https://$${1}/remote.php/dav/"
+         - "traefik.http.services.nextcloud.loadbalancer.server.port=80"
+     
+   adminer:
+      image: adminer:latest
+      container_name: adminer
+      hostname: adminer
+      restart: unless-stopped
+      depends_on:
+         - mariadb
+      networks:
+         - frontend
+         - backend
+      labels:
+         - "traefik.enable=true"
+         - "traefik.http.routers.adminer.entrypoints=websecure"
+         - "traefik.http.routers.adminer.rule=Host(`db.${MY_DOMAIN}`)"
+         - "traefik.http.services.adminer.loadbalancer.server.port=8080"
+
+networks:
+  frontend:
+    external: true
+  backend:
+    external: true
