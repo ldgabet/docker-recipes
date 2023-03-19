@@ -139,6 +139,11 @@ services:
 
 networks:
   frontend:
-    external: true
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
   backend:
-    external: true
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.19.0.0/16
